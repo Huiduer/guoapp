@@ -1,0 +1,111 @@
+name: Sync Upstream Tags and Releases
+
+
+on:
+  workflow_dispatch:
+
+
+permissions:
+  contents: write
+
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+
+    env:
+      UPSTREAM: Xanerix/guoapp
+      GH_TOKEN: ${{ github.token }}
+
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+
+      - name: Sync all tags
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM}.git"
+          git fetch upstream --tags
+          git push origin --tags
+
+
+      - name: Sync releases and assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+
+          gh api --paginate \
+            "repos/${UPSTREAM}/releases?per_page=100" \
+            --jq '.[].tag_name' > /tmp/release-tags.txt
+
+
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            echo "Syncing release: $tag"
+
+
+            metadata=$(gh release view "$tag" \
+              --repo "$UPSTREAM" \
+              --json name,body,isPrerelease)
+
+
+            title=$(jq -r '.name // ""' <<< "$metadata")
+            prerelease=$(jq -r '.isPrerelease' <<< "$metadata")
+
+
+            jq -r '.body // ""' <<< "$metadata" \
+              > /tmp/release-notes.md
+
+
+            if gh release view "$tag" \
+              --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+
+
+              gh release edit "$tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "$title" \
+                --notes-file /tmp/release-notes.md \
+                --prerelease="$prerelease"
+            else
+              gh release create "$tag" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "$title" \
+                --notes-file /tmp/release-notes.md \
+                --prerelease="$prerelease" \
+                --verify-tag
+            fi
+
+
+            count=$(gh release view "$tag" \
+              --repo "$UPSTREAM" \
+              --json assets \
+              --jq '.assets | length')
+
+
+            if [ "$count" -gt 0 ]; then
+              mkdir -p /tmp/release-assets
+              rm -f /tmp/release-assets/*
+
+
+              gh release download "$tag" \
+                --repo "$UPSTREAM" \
+                --dir /tmp/release-assets
+
+
+              gh release upload "$tag" \
+                /tmp/release-assets/* \
+                --repo "$GITHUB_REPOSITORY" \
+                --clobber
+            fi
+
+
+          done < /tmp/release-tags.txt
+
+
+          echo "Sync completed!"
